@@ -4,7 +4,8 @@ import React, { useState, useEffect } from "react";
 import { View, StyleSheet, ScrollView, Alert } from "react-native";
 import { TextInput, Button, Text } from "react-native-paper";
 import { DatePickerModal } from "react-native-paper-dates";
-import { addService, updateService, Service } from "../services/serviceStorage";
+import { addService, updateService, Service, getServices } from "../services/serviceStorage";
+import TimePickerModal from "../components/TimePickerModal";
 
 const AddServiceScreen = ({ route, navigation }: any) => {
   // Verificar se estamos em modo de edição e se há uma data pré-selecionada
@@ -21,6 +22,8 @@ const AddServiceScreen = ({ route, navigation }: any) => {
   const [horaInicio, setHoraInicio] = useState("");
   const [horaFim, setHoraFim] = useState("");
   const [datePickerOpen, setDatePickerOpen] = useState(false);
+  const [startTimePickerOpen, setStartTimePickerOpen] = useState(false);
+  const [endTimePickerOpen, setEndTimePickerOpen] = useState(false);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -53,15 +56,92 @@ const AddServiceScreen = ({ route, navigation }: any) => {
     setData(params.date);
   };
 
+  // Função para verificar conflitos de horário
+  const checkTimeConflicts = async (date: Date, start: string, end: string, currentServiceId?: string) => {
+    try {
+      const allServices = await getServices();
+      const dateString = date.toISOString().split('T')[0];
+      
+      // Converter horários para minutos para facilitar a comparação
+      const startMinutes = convertTimeToMinutes(start);
+      const endMinutes = convertTimeToMinutes(end);
+      
+      // Filtrar serviços para a mesma data
+      const servicesOnSameDay = allServices.filter(service => {
+        // Pular o próprio serviço em caso de edição
+        if (currentServiceId && service.id === currentServiceId) {
+          return false;
+        }
+        
+        const serviceDate = service.data.split('T')[0];
+        return serviceDate === dateString;
+      });
+      
+      // Verificar conflitos de horário
+      for (const service of servicesOnSameDay) {
+        const serviceStartMinutes = convertTimeToMinutes(service.horaInicio);
+        const serviceEndMinutes = convertTimeToMinutes(service.horaFim);
+        
+        // Verifica se há sobreposição de horários
+        if (
+          (startMinutes >= serviceStartMinutes && startMinutes < serviceEndMinutes) || // Início durante outro serviço
+          (endMinutes > serviceStartMinutes && endMinutes <= serviceEndMinutes) || // Fim durante outro serviço
+          (startMinutes <= serviceStartMinutes && endMinutes >= serviceEndMinutes) // Engloba outro serviço
+        ) {
+          return {
+            hasConflict: true,
+            conflictService: service,
+          };
+        }
+      }
+      
+      return { hasConflict: false };
+    } catch (error) {
+      console.error("Erro ao verificar conflitos de horário:", error);
+      return { hasConflict: false }; // Em caso de erro, permitir salvar
+    }
+  };
+  
+  // Função auxiliar para converter horário (HH:MM) em minutos
+  const convertTimeToMinutes = (time: string) => {
+    const [hours, minutes] = time.split(':').map(Number);
+    return hours * 60 + minutes;
+  };
+
   const handleSave = async () => {
     // Validar os campos obrigatórios
     if (!clienteNome || !clienteNumero || !endereco || !servicoFeito || !valorTotal || !data || !horaInicio || !horaFim) {
       Alert.alert("Erro", "Por favor, preencha todos os campos");
       return;
     }
+    
+    // Validar se o horário de início é anterior ao horário de fim
+    const startMinutes = convertTimeToMinutes(horaInicio);
+    const endMinutes = convertTimeToMinutes(horaFim);
+    
+    if (startMinutes >= endMinutes) {
+      Alert.alert("Erro", "O horário de início deve ser anterior ao horário de fim");
+      return;
+    }
 
     try {
       setLoading(true);
+      
+      // Verificar conflitos de horário
+      const currentServiceId = editMode && serviceToEdit ? serviceToEdit.id : undefined;
+      const { hasConflict, conflictService } = await checkTimeConflicts(data, horaInicio, horaFim, currentServiceId);
+      
+      if (hasConflict && conflictService) {
+        Alert.alert(
+          "Conflito de Horário",
+          `Já existe um serviço agendado para ${horaInicio} - ${horaFim} nesta data:\n\n` +
+          `Cliente: ${conflictService.clienteNome}\n` +
+          `Serviço: ${conflictService.servicoFeito}\n\n` +
+          `Por favor, escolha outro horário.`
+        );
+        setLoading(false);
+        return;
+      }
 
       const serviceData = {
         clienteNome,
@@ -168,22 +248,48 @@ const AddServiceScreen = ({ route, navigation }: any) => {
         />
 
         <View style={styles.timeContainer}>
-          <TextInput
-            label="Hora Início"
-            value={horaInicio}
-            onChangeText={setHoraInicio}
-            placeholder="Ex: 14:00"
-            style={[styles.input, styles.timeInput]}
-          />
+          <Button
+            mode="outlined"
+            onPress={() => setStartTimePickerOpen(true)}
+            style={[styles.timeButton, styles.timeInput]}
+          >
+            {horaInicio ? `Início: ${horaInicio}` : "Hora Início"}
+          </Button>
 
-          <TextInput
-            label="Hora Fim"
-            value={horaFim}
-            onChangeText={setHoraFim}
-            placeholder="Ex: 16:00"
-            style={[styles.input, styles.timeInput]}
-          />
+          <Button
+            mode="outlined"
+            onPress={() => setEndTimePickerOpen(true)}
+            style={[styles.timeButton, styles.timeInput]}
+          >
+            {horaFim ? `Fim: ${horaFim}` : "Hora Fim"}
+          </Button>
         </View>
+
+        {/* Modal de seleção de hora de início */}
+        <TimePickerModal
+          visible={startTimePickerOpen}
+          onDismiss={() => setStartTimePickerOpen(false)}
+          onConfirm={(time) => {
+            setHoraInicio(time);
+            // Se a hora de fim não estiver definida ou for anterior à hora de início,
+            // sugerir uma hora de fim 1 hora depois
+            if (!horaFim || convertTimeToMinutes(time) >= convertTimeToMinutes(horaFim)) {
+              const [hours, minutes] = time.split(':').map(Number);
+              let newHours = hours + 1;
+              if (newHours > 22) newHours = 22;
+              setHoraFim(`${newHours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`);
+            }
+          }}
+          currentTime={horaInicio}
+        />
+
+        {/* Modal de seleção de hora de fim */}
+        <TimePickerModal
+          visible={endTimePickerOpen}
+          onDismiss={() => setEndTimePickerOpen(false)}
+          onConfirm={setHoraFim}
+          currentTime={horaFim}
+        />
 
         <Button
           mode="contained"
@@ -224,9 +330,13 @@ const styles = StyleSheet.create({
   timeContainer: {
     flexDirection: "row",
     justifyContent: "space-between",
+    marginBottom: 16,
   },
   timeInput: {
     flex: 0.48,
+  },
+  timeButton: {
+    padding: 5,
   },
   saveButton: {
     marginTop: 24,
